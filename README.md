@@ -121,6 +121,12 @@ cp .env.example .env.local
 
 ### 4. Run the Application
 
+#### Install livekit server
+
+```bash
+brew install livekit
+```
+
 You have two options:
 
 #### Option A: Use the convenience script (runs everything)
