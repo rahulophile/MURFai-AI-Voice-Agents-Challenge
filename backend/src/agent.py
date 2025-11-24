@@ -2,7 +2,7 @@ import logging
 import os
 import json
 import datetime
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -26,79 +26,158 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+WELLNESS_LOG_PATH = "wellness_log.json"
+
+
+def _load_wellness_history(max_entries: int = 3) -> str:
+    """Load recent wellness check-ins and return a short textual summary
+    that the model can use for gentle references.
+    """
+    if not os.path.exists(WELLNESS_LOG_PATH):
+        return "No previous check-ins are available yet."
+
+    try:
+        with open(WELLNESS_LOG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("Failed to read wellness log: %s", e)
+        return "Previous check-ins exist, but they could not be read."
+
+    if not isinstance(data, list) or len(data) == 0:
+        return "No previous check-ins are available yet."
+
+    # Take last N entries
+    recent = data[-max_entries:]
+    lines = []
+    for entry in recent:
+        ts = entry.get("timestamp", "unknown time")
+        mood = entry.get("mood", "unknown mood")
+        energy = entry.get("energy", "unknown energy")
+        objectives = entry.get("objectives", [])
+        summary = entry.get("summary", "")
+
+        if isinstance(objectives, list):
+            obj_text = "; ".join(objectives)
+        else:
+            obj_text = str(objectives)
+
+        line = f"- {ts}: mood '{mood}', energy '{energy}', objectives: {obj_text}"
+        if summary:
+            line += f". Summary: {summary}"
+        lines.append(line)
+
+    return "Recent check-ins:\n" + "\n".join(lines)
+
 
 class Assistant(Agent):
     def __init__(self) -> None:
+        history_summary = _load_wellness_history()
+
         super().__init__(
-            instructions="""
-You are a friendly coffee shop barista for a specialty coffee brand called "Pallavi's Roastery".
+            instructions=f"""
+You are a calm, supportive, and realistic health & wellness voice companion.
 
-Your only job is to help the customer place a coffee order by asking clear, simple questions.
-You must maintain an internal coffee order with the following fields:
+Your role:
+- Have a short daily check-in with the user.
+- Ask about their mood, energy, and any current stressors.
+- Ask about 1–3 simple, realistic objectives or intentions for the day.
+- Offer small, actionable, non-medical suggestions based on what they share.
+- Avoid any diagnosis, medical claims, or clinical language. You are not a doctor or therapist.
 
-- drinkType: type of drink (e.g., latte, cappuccino, americano, cold brew)
-- size: small, medium, or large
-- milk: e.g., regular, skim, soy, almond, oat
-- extras: a list of extras (e.g., extra shot, caramel syrup, vanilla, whipped cream)
-- name: the customer's name
+Conversation structure:
+1. Gently ask how they are feeling today and what their energy is like.
+2. Ask if anything is stressing them out or on their mind.
+3. Ask for 1–3 things they would like to get done today (work, study, personal).
+4. Ask if there is anything they want to do for themselves (rest, hobbies, movement, breaks).
+5. Reflect back briefly with supportive language.
+6. Close with a short recap of:
+   - Their mood and energy.
+   - Their main 1–3 objectives for the day.
+   - One small, realistic suggestion if appropriate.
 
-Behavior rules:
-- Start by greeting the user as a barista and asking what they would like.
-- If some fields are missing or unclear, ask polite follow-up questions.
-- Ask only one or two things at a time so it's easy to answer.
-- Keep the conversation short, natural, and to the point.
-- Once you are confident that all fields (drinkType, size, milk, extras, name) are filled,
-  call the `finalize_order` tool exactly once with the values you collected.
-- After the tool returns, clearly summarize the final order to the user and thank them.
+After you have:
+- A clear sense of today's mood,
+- A simple description of energy,
+- Any key stressors (if shared),
+- A list of objectives/intentions (1–3),
+- A one-sentence recap/summary,
 
-Never talk about tools, JSON, files, or internal state directly to the user.
-Stay in-character as a barista at all times.
+then call the `save_wellness_checkin` tool exactly once with:
+- mood: a short mood description in the user's own terms if possible
+- energy: a short description like "low", "okay", "high", etc.
+- stressors: a short phrase or sentence
+- objectives: a list of 1–3 short strings
+- summary: one sentence summarizing today's check-in
+
+Past data:
+Here is some context from previous check-ins (if any). Use it gently:
+{history_summary}
+
+How to use this context:
+- Occasionally refer back in a soft way, e.g. "Last time you mentioned low energy, how does today compare?"
+- Do not read it verbatim.
+- Do not overwhelm the user with history.
+- Keep the tone non-judgmental and supportive.
+
+Important:
+- Do NOT give medical advice.
+- Do NOT mention tools, JSON, or files.
+- Keep responses short, clear, and conversational.
 """,
         )
 
     @function_tool
-    async def finalize_order(
+    async def save_wellness_checkin(
         self,
         context: RunContext,
-        drinkType: str,
-        size: str,
-        milk: str,
-        extras: List[str],
-        name: str,
+        mood: str,
+        energy: str,
+        stressors: Optional[str],
+        objectives: List[str],
+        summary: str,
     ) -> str:
         """
-        Finalize the coffee order and save it to a JSON file.
+        Save a single wellness check-in entry to a JSON file.
 
-        Use this tool only when the order is complete and all fields are known.
+        This should be called once per check-in, after the recap.
         """
 
-        order = {
-            "drinkType": drinkType,
-            "size": size,
-            "milk": milk,
-            "extras": extras,
-            "name": name,
+        entry = {
+            "timestamp": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "mood": mood,
+            "energy": energy,
+            "stressors": stressors or "",
+            "objectives": objectives,
+            "summary": summary,
         }
 
-        # Ensure the orders directory exists (relative to backend working directory)
-        os.makedirs("orders", exist_ok=True)
+        # Load existing log (if any)
+        log: List[dict] = []
+        if os.path.exists(WELLNESS_LOG_PATH):
+            try:
+                with open(WELLNESS_LOG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        log = data
+            except Exception as e:
+                logger.warning("Failed to read existing wellness log: %s", e)
 
-        # Create a timestamped filename
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        filename = f"order-{ts}.json"
-        path = os.path.join("orders", filename)
+        log.append(entry)
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(order, f, indent=2)
+        # Save updated log
+        try:
+            with open(WELLNESS_LOG_PATH, "w", encoding="utf-8") as f:
+                json.dump(log, f, indent=2)
+            logger.info("Saved wellness check-in: %s", entry)
+        except Exception as e:
+            logger.error("Failed to save wellness check-in: %s", e)
+            return "There was an error saving the wellness check-in."
 
-        logger.info("Saved order to %s: %s", path, order)
-
-        extras_text = ", ".join(extras) if extras else "no extras"
-
-        # This string is for the model to read and then confirm back to the user
+        # Return a compact string for the model to use internally
+        obj_text = ", ".join(objectives) if objectives else "no specific objectives"
         return (
-            f"Order saved: {size} {drinkType} with {milk} milk, "
-            f"{extras_text}, for {name}. File name: {filename}."
+            f"Saved wellness check-in with mood '{mood}', energy '{energy}', "
+            f"stressors '{stressors or 'none'}', objectives {obj_text}."
         )
 
 
@@ -108,40 +187,26 @@ def prewarm(proc: JobProcess):
 
 async def entrypoint(ctx: JobContext):
     # Logging setup
-    # Add any other context you want in all log entries here
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using Deepgram, Gemini, Murf, and the LiveKit turn detector
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
         stt=deepgram.STT(model="nova-3"),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
         llm=google.LLM(
             model="gemini-2.5-flash",
         ),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
             voice="en-US-matthew",
             style="Conversation",
             tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
             text_pacing=True,
         ),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
     )
 
-    # Metrics collection, to measure pipeline performance
-    # For more information, see https://docs.livekit.io/agents/build/metrics/
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -155,17 +220,14 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
         agent=Assistant(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            # For telephony applications, use `BVCTelephony` for best results
             noise_cancellation=noise_cancellation.BVC(),
         ),
     )
 
-    # Join the room and connect to the user
     await ctx.connect()
 
 
