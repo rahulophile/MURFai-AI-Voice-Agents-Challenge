@@ -1,7 +1,6 @@
 import logging
 import os
 import json
-import datetime
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -26,158 +25,180 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-WELLNESS_LOG_PATH = "wellness_log.json"
+CONTENT_PATH = "shared-data/day4_tutor_content.json"
 
 
-def _load_wellness_history(max_entries: int = 3) -> str:
-    """Load recent wellness check-ins and return a short textual summary
-    that the model can use for gentle references.
-    """
-    if not os.path.exists(WELLNESS_LOG_PATH):
-        return "No previous check-ins are available yet."
+def _load_tutor_content() -> List[dict]:
+    """Load tutor concepts from the JSON content file."""
+    if not os.path.exists(CONTENT_PATH):
+        logger.warning("Tutor content file not found at %s", CONTENT_PATH)
+        return []
 
     try:
-        with open(WELLNESS_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(CONTENT_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
-        logger.warning("Failed to read wellness log: %s", e)
-        return "Previous check-ins exist, but they could not be read."
+        logger.error("Failed to load tutor content: %s", e)
+        return []
 
-    if not isinstance(data, list) or len(data) == 0:
-        return "No previous check-ins are available yet."
+    if not isinstance(data, list):
+        logger.error("Tutor content must be a list of concept objects.")
+        return []
 
-    # Take last N entries
-    recent = data[-max_entries:]
-    lines = []
-    for entry in recent:
-        ts = entry.get("timestamp", "unknown time")
-        mood = entry.get("mood", "unknown mood")
-        energy = entry.get("energy", "unknown energy")
-        objectives = entry.get("objectives", [])
-        summary = entry.get("summary", "")
-
-        if isinstance(objectives, list):
-            obj_text = "; ".join(objectives)
-        else:
-            obj_text = str(objectives)
-
-        line = f"- {ts}: mood '{mood}', energy '{energy}', objectives: {obj_text}"
-        if summary:
-            line += f". Summary: {summary}"
-        lines.append(line)
-
-    return "Recent check-ins:\n" + "\n".join(lines)
+    return data
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
-        history_summary = _load_wellness_history()
+        self.content: List[dict] = _load_tutor_content()
+
+        # Build a short overview of concepts for the system prompt
+        if self.content:
+            concepts_overview = "\n".join(
+                f"- {c.get('id', '')}: {c.get('title', '')}"
+                for c in self.content
+            )
+        else:
+            concepts_overview = "No concepts loaded. Make sure the JSON file exists."
 
         super().__init__(
             instructions=f"""
-You are a calm, supportive, and realistic health & wellness voice companion.
+You are an Active Recall Coach in a "Teach-the-Tutor" experience.
 
-Your role:
-- Have a short daily check-in with the user.
-- Ask about their mood, energy, and any current stressors.
-- Ask about 1–3 simple, realistic objectives or intentions for the day.
-- Offer small, actionable, non-medical suggestions based on what they share.
-- Avoid any diagnosis, medical claims, or clinical language. You are not a doctor or therapist.
+Your job:
+- Help the user learn programming concepts using three modes: learn, quiz, and teach_back.
+- Encourage the user to explain concepts back to you.
+- Keep your tone simple, encouraging, and clear.
+- You are not a general chatbot. Stay focused on helping the user learn the concepts in the course content.
 
-Conversation structure:
-1. Gently ask how they are feeling today and what their energy is like.
-2. Ask if anything is stressing them out or on their mind.
-3. Ask for 1–3 things they would like to get done today (work, study, personal).
-4. Ask if there is anything they want to do for themselves (rest, hobbies, movement, breaks).
-5. Reflect back briefly with supportive language.
-6. Close with a short recap of:
-   - Their mood and energy.
-   - Their main 1–3 objectives for the day.
-   - One small, realistic suggestion if appropriate.
+Available learning modes:
+- learn: you explain the concept in simple language.
+- quiz: you ask the user questions about the concept.
+- teach_back: you ask the user to explain the concept back, then you give short qualitative feedback.
 
-After you have:
-- A clear sense of today's mood,
-- A simple description of energy,
-- Any key stressors (if shared),
-- A list of objectives/intentions (1–3),
-- A one-sentence recap/summary,
+Voices (conceptual mapping):
+- learn mode uses Murf Falcon voice "Matthew".
+- quiz mode uses Murf Falcon voice "Alicia".
+- teach_back mode uses Murf Falcon voice "Ken".
 
-then call the `save_wellness_checkin` tool exactly once with:
-- mood: a short mood description in the user's own terms if possible
-- energy: a short description like "low", "okay", "high", etc.
-- stressors: a short phrase or sentence
-- objectives: a list of 1–3 short strings
-- summary: one sentence summarizing today's check-in
+You do not control the audio directly, but you should behave as if these voices are used for the three modes.
 
-Past data:
-Here is some context from previous check-ins (if any). Use it gently:
-{history_summary}
+Course content:
+You have a small set of concepts loaded from a JSON file.
+Each concept has:
+- id
+- title
+- summary
+- sample_question
 
-How to use this context:
-- Occasionally refer back in a soft way, e.g. "Last time you mentioned low energy, how does today compare?"
-- Do not read it verbatim.
-- Do not overwhelm the user with history.
-- Keep the tone non-judgmental and supportive.
+Concepts available:
+{concepts_overview}
+
+Core behavior:
+1. When the conversation starts, greet the user briefly and ask:
+   - which mode they want to use first (learn, quiz, or teach_back),
+   - and which concept they want (e.g. by id or title).
+2. When the user chooses a mode and concept, call the `set_tutor_mode` tool to select them.
+3. After `set_tutor_mode` returns, follow these rules:
+
+   - learn mode:
+     - Use the concept summary to explain the idea in simple terms.
+     - Give 1–2 short examples if helpful.
+     - Keep it concise.
+
+   - quiz mode:
+     - Use the sample_question as a starting point.
+     - Ask the question and wait for the user's answer.
+     - Then, give brief, encouraging feedback based on their answer.
+     - You can ask 1–2 follow-up questions if time allows.
+
+   - teach_back mode:
+     - Ask the user to explain the concept in their own words.
+     - After they respond, highlight what they did well and one thing they could add or clarify.
+     - Keep feedback short and friendly.
+
+4. The user can switch modes at any time by saying things like:
+   - "Switch to quiz mode."
+   - "Can we do teach back for loops?"
+   When that happens, call `set_tutor_mode` again with the new mode (and concept if they specify it).
 
 Important:
-- Do NOT give medical advice.
-- Do NOT mention tools, JSON, or files.
-- Keep responses short, clear, and conversational.
+- Stay focused on the given concepts. If the user asks about something completely unrelated, gently bring them back.
+- Keep your answers short and spoken-friendly. Avoid long paragraphs.
+- Do not mention tools, JSON files, or internal state.
 """,
         )
 
+    def _find_concept(self, concept_id_or_title: Optional[str]) -> Optional[dict]:
+        """Find a concept by id or title (case-insensitive)."""
+        if not self.content:
+            return None
+
+        if not concept_id_or_title:
+            # Default to the first concept
+            return self.content[0]
+
+        key = concept_id_or_title.strip().lower()
+
+        # Try id match
+        for c in self.content:
+            if str(c.get("id", "")).lower() == key:
+                return c
+
+        # Try title match
+        for c in self.content:
+            if str(c.get("title", "")).lower() == key:
+                return c
+
+        # Fallback: first concept
+        return self.content[0]
+
     @function_tool
-    async def save_wellness_checkin(
+    async def set_tutor_mode(
         self,
         context: RunContext,
-        mood: str,
-        energy: str,
-        stressors: Optional[str],
-        objectives: List[str],
-        summary: str,
+        mode: str,
+        concept: Optional[str] = None,
     ) -> str:
         """
-        Save a single wellness check-in entry to a JSON file.
+        Select the current learning mode and concept for the tutor.
 
-        This should be called once per check-in, after the recap.
+        Args:
+            mode: One of "learn", "quiz", or "teach_back".
+            concept: A concept id or title (e.g., "variables" or "loops").
         """
 
-        entry = {
-            "timestamp": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "mood": mood,
-            "energy": energy,
-            "stressors": stressors or "",
-            "objectives": objectives,
-            "summary": summary,
-        }
+        mode_normalized = (mode or "").strip().lower()
+        if mode_normalized not in ("learn", "quiz", "teach_back"):
+            return (
+                "Invalid mode. Please choose one of: learn, quiz, or teach_back. "
+                "Keep the user's request in mind and ask them again."
+            )
 
-        # Load existing log (if any)
-        log: List[dict] = []
-        if os.path.exists(WELLNESS_LOG_PATH):
-            try:
-                with open(WELLNESS_LOG_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        log = data
-            except Exception as e:
-                logger.warning("Failed to read existing wellness log: %s", e)
+        selected_concept = self._find_concept(concept)
+        if not selected_concept:
+            return (
+                "No tutor content is available. Ask the user to check back later or "
+                "to ensure the content file is configured."
+            )
 
-        log.append(entry)
+        # Prepare a compact description for the LLM to use
+        concept_id = selected_concept.get("id", "")
+        title = selected_concept.get("title", "")
+        summary = selected_concept.get("summary", "")
+        sample_q = selected_concept.get("sample_question", "")
 
-        # Save updated log
-        try:
-            with open(WELLNESS_LOG_PATH, "w", encoding="utf-8") as f:
-                json.dump(log, f, indent=2)
-            logger.info("Saved wellness check-in: %s", entry)
-        except Exception as e:
-            logger.error("Failed to save wellness check-in: %s", e)
-            return "There was an error saving the wellness check-in."
-
-        # Return a compact string for the model to use internally
-        obj_text = ", ".join(objectives) if objectives else "no specific objectives"
+        # Note: we are not mutating any shared session state here.
+        # The LLM should use this returned text to continue the conversation.
         return (
-            f"Saved wellness check-in with mood '{mood}', energy '{energy}', "
-            f"stressors '{stressors or 'none'}', objectives {obj_text}."
+            f"Tutor mode set to '{mode_normalized}' for concept '{concept_id}' "
+            f"({title}). "
+            f"Summary: {summary} "
+            f"Sample question: {sample_q}. "
+            "In learn mode, explain using the summary. "
+            "In quiz mode, use the sample question (and simple follow-ups). "
+            "In teach_back mode, ask the user to explain the concept in their own words, "
+            "then give friendly, brief feedback."
         )
 
 
