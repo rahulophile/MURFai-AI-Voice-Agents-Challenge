@@ -1,0 +1,22 @@
+{
+  "company": "Zerodha",
+  "description": "Zerodha is India's largest stock brokerage platform that offers discount broking, zero brokerage on equity delivery, and tools for stock market investing and trading.",
+  "faqs": [
+    {
+      "q": "What does your product do?",
+      "a": "Zerodha provides an online platform to invest in stocks, mutual funds, bonds, and trade derivatives at low brokerage fees."
+    },
+    {
+      "q": "Do you have a free tier?",
+      "a": "Opening an account on Zerodha is free. Equity delivery trades carry zero brokerage."
+    },
+    {
+      "q": "Who is this for?",
+      "a": "Zerodha is built for stock market investors, traders, beginners, and long-term wealth builders."
+    },
+    {
+      "q": "What are the brokerage charges?",
+      "a": "Equity delivery is free. Intraday and F&O trades charge ₹20 per order or 0.03%, whichever is lower."
+    }
+  ]
+}
