@@ -2,7 +2,7 @@ import logging
 import os
 import json
 import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -26,206 +26,250 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-FAQ_PATH = "shared-data/day5_company_faq.json"
-LEADS_DIR = "leads"
+FRAUD_DB_PATH = "fraud_cases.json"
 
 
-def _load_company_faq() -> dict:
-    """Load company info + FAQ from JSON file."""
-    if not os.path.exists(FAQ_PATH):
-        logger.warning("FAQ file not found at %s", FAQ_PATH)
-        return {}
+def _load_fraud_db() -> List[dict]:
+    """Load fraud cases from a JSON 'database' file."""
+    if not os.path.exists(FRAUD_DB_PATH):
+        logger.warning("Fraud DB file not found at %s", FRAUD_DB_PATH)
+        return []
 
     try:
-        with open(FAQ_PATH, "r", encoding="utf-8") as f:
+        with open(FRAUD_DB_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
-        logger.error("Failed to load FAQ content: %s", e)
-        return {}
+        logger.error("Failed to load fraud DB: %s", e)
+        return []
 
-    if not isinstance(data, dict):
-        logger.error("FAQ content must be a JSON object (dict) with company, description, faqs.")
-        return {}
+    if isinstance(data, dict):
+        # Allow a single object DB, normalize to list
+        return [data]
+    if isinstance(data, list):
+        return data
 
-    # Normalize FAQ list
-    faqs = data.get("faqs", [])
-    if not isinstance(faqs, list):
-        data["faqs"] = []
-    return data
+    logger.error("Fraud DB must be a list or object, got %s", type(data))
+    return []
+
+
+def _save_fraud_db(cases: List[dict]) -> None:
+    """Save fraud cases list back to JSON DB."""
+    try:
+        with open(FRAUD_DB_PATH, "w", encoding="utf-8") as f:
+            json.dump(cases, f, indent=2)
+        logger.info("Fraud DB updated with %d case(s).", len(cases))
+    except Exception as e:
+        logger.error("Failed to save fraud DB: %s", e)
+
+
+def _find_case_by_username(
+    cases: List[dict], user_name: str
+) -> Tuple[Optional[dict], Optional[int]]:
+    """Find a case by userName (case-insensitive). Returns (case, index)."""
+    if not user_name:
+        return None, None
+
+    key = user_name.strip().lower()
+    for idx, case in enumerate(cases):
+        if str(case.get("userName", "")).strip().lower() == key:
+            return case, idx
+    return None, None
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
-        self.company_data = _load_company_faq()
-        company_name = self.company_data.get("company", "the company")
-        description = self.company_data.get("description", "")
-        faqs = self.company_data.get("faqs", [])
-
-        # Short FAQ overview for system prompt
-        if faqs:
-            faq_overview_lines: List[str] = []
-            for f in faqs:
-                q = f.get("q", "")
-                a = f.get("a", "")
-                if len(a) > 180:
-                    a_preview = a[:177] + "..."
-                else:
-                    a_preview = a
-                faq_overview_lines.append(f"- Q: {q}\n  A: {a_preview}")
-            faq_overview = "\n".join(faq_overview_lines)
+        cases = _load_fraud_db()
+        if cases:
+            example_case = cases[0]
+            example_name = example_case.get("userName", "SampleUser")
+            example_card = example_case.get("cardEnding", "1234")
         else:
-            faq_overview = "No FAQ entries loaded."
+            example_name = "SampleUser"
+            example_card = "1234"
 
         super().__init__(
             instructions=f"""
-You are a voice-based Sales Development Representative (SDR) for the company "{company_name}".
-
-Company description (for your context):
-{description}
+You are a calm, professional fraud alert representative for a fictional bank called "SecureTrust Bank".
 
 Your job:
-- Greet visitors warmly and professionally.
-- Ask what brought them here and what they are working on.
-- Keep the conversation focused on understanding their needs and whether {company_name} is a good fit.
-- Answer questions about the product, who it is for, and pricing using the provided FAQ content.
-- Politely collect key lead details and summarize them at the end of the call.
+- Handle a single fraud alert call/session at a time.
+- Use ONLY fake demo data loaded from the fraud database by tools.
+- Never ask for full card numbers, PINs, passwords, OTPs, or any sensitive credentials.
 
-Very important:
-- When the user asks about the product, pricing, or who it is for, you MUST call the `lookup_faq` tool with their question.
-- Use ONLY information from the FAQ answer returned by the tool. Do NOT invent or guess extra details.
-- If the FAQ tool indicates that information is not available, be honest and say that you don't have that detail.
+High-level call flow:
+1. Greet the customer and introduce yourself clearly as SecureTrust Bank fraud monitoring.
+2. Explain that you are contacting them about a suspicious transaction on their card.
+3. Ask for their first name to look up the case.
+4. Call the `load_fraud_case` tool exactly once after the user shares their name.
+   - If the tool says no case is found, politely say you couldn't locate their record and end the call.
+5. If a case is found:
+   - Use the returned details to:
+     - Mention the masked card ending (e.g. "card ending in 4242"),
+     - Mention the merchant, amount, time, and location.
+   - Ask the security question provided in the tool result (for example, "What is your favorite color?").
+6. After the user answers the security question:
+   - Call the `verify_security_answer` tool with the user's name and their answer.
+   - If verification FAILED:
+     - Tell the user that you cannot complete the verification and cannot discuss account details.
+     - Call `update_fraud_status` with status "verification_failed" and a short outcome note.
+     - End the call politely.
+   - If verification PASSED:
+     - Clearly read out the suspicious transaction details from the case.
+     - Ask: "Did you make this transaction? Please answer yes or no."
 
-FAQ overview (for your reference only):
-{faq_overview}
+7. When the user answers about the transaction:
+   - If they say it WAS them:
+     - Treat the case as safe.
+     - Call `update_fraud_status` with status "confirmed_safe" and a short note such as
+       "Customer confirmed the transaction as legitimate."
+     - Tell them the transaction is marked as safe and no further action is taken.
+   - If they say it was NOT them:
+     - Treat the case as fraud.
+     - Call `update_fraud_status` with status "confirmed_fraud" and a short note such as
+       "Customer denied the transaction. Card blocked and dispute initiated (demo)."
+     - Tell them you are blocking the card and raising a mock dispute (clearly mention that this is a demo).
 
-Lead collection:
-Over the course of the conversation, you should naturally ask for:
-- Name
-- Company
-- Email
-- Role
-- Use case (what they want to use this for)
-- Team size
-- Timeline (now / soon / later)
+8. End the call with a short summary of:
+   - The final decision: safe, fraud, or verification failed.
+   - Any mock actions taken (e.g., "card blocked in this demo scenario").
 
-Do this gradually, not as an interrogation. Fit questions into the flow of conversation.
+Important safety rules:
+- NEVER ask for full card numbers, CVV, PIN, passwords, or OTP.
+- Verification must ONLY use the security question from the database.
+- Make it clear this is a demo/sandbox if appropriate.
+- Keep responses short, clear, and suitable for spoken conversation.
+- Do not mention tools, JSON, or internal implementation details.
 
-End-of-call behavior:
-- When the user signals the conversation is ending (e.g., says "that's all", "I'm done", "thanks"), you should:
-  1. Call the `save_lead` tool ONCE with the best values you have for all lead fields. Use "unknown" for anything that was not provided.
-  2. After the tool returns, give a short spoken summary of:
-     - Who they are (name, role, company),
-     - What they are interested in (use case),
-     - Their approximate timeline (now / soon / later).
-  3. Thank them for their time.
-
-Tone:
-- Warm, concise, and clearly focused on being helpful.
-- Avoid jargon unless the user is clearly technical.
-- Do NOT mention tools, JSON files, or internal implementation details to the user.
-- Keep your responses short and suitable for speech.
+Example fake customer context (for your understanding only, do not read verbatim):
+- Example user name: {example_name}
+- Example card ending: {example_card}
 """,
         )
 
     @function_tool
-    async def lookup_faq(self, context: RunContext, question: str) -> str:
+    async def load_fraud_case(self, context: RunContext, user_name: str) -> str:
         """
-        Look up an answer in the company FAQ for a user question.
+        Load a fraud case for the given user name.
 
-        The model should call this whenever the user asks about product/company/pricing.
+        The model should call this once after the user shares their name.
         """
 
-        data = self.company_data or {}
-        faqs = data.get("faqs", [])
-        if not faqs:
+        cases = _load_fraud_db()
+        case, _ = _find_case_by_username(cases, user_name)
+
+        if not case:
             return (
-                "No FAQ data is available. You should tell the user that you don't have "
-                "the detailed information right now, but can share a high-level description."
+                "No fraud case was found for this user name. "
+                "You should politely tell the user that you could not find a matching record "
+                "and end the call."
             )
 
-        q_lower = (question or "").lower()
-        best_match = None
-        best_score = 0
+        # Build a compact description for the LLM to use
+        userName = case.get("userName", "Unknown")
+        cardEnding = case.get("cardEnding", "Unknown")
+        amount = case.get("transactionAmount", "Unknown amount")
+        merchant = case.get("transactionName", "Unknown merchant")
+        category = case.get("transactionCategory", "Unknown category")
+        time = case.get("transactionTime", "Unknown time")
+        location = case.get("transactionLocation", "Unknown location")
+        securityQuestion = case.get("securityQuestion", "Unknown question")
+        status = case.get("status", "pending_review")
 
-        # Very simple keyword-based matching: count overlapping words
-        q_words = [w for w in q_lower.split() if len(w) > 2]
-
-        for entry in faqs:
-            fq = str(entry.get("q", "")).lower()
-            fa = str(entry.get("a", ""))
-            text = fq + " " + fa.lower()
-            score = 0
-            for w in q_words:
-                if w in text:
-                    score += 1
-            if score > best_score:
-                best_score = score
-                best_match = entry
-
-        if not best_match or best_score == 0:
-            return (
-                "I could not find a specific FAQ answer for this question. "
-                "You should respond honestly that you don't have that exact detail, "
-                "and if possible, give a short high-level answer based on the company description."
-            )
-
-        answer = best_match.get("a", "")
-        faq_q = best_match.get("q", "")
         return (
-            f"FAQ match found. The closest question was: '{faq_q}'. "
-            f"The answer is: {answer}"
+            f"A fraud case was found for user '{userName}'. "
+            f"Masked card ending: {cardEnding}. "
+            f"Suspicious transaction: {amount} at {merchant} "
+            f"in category {category}, around {time} in {location}. "
+            f"Security question to ask the user: {securityQuestion}. "
+            f"Current status is '{status}'. "
+            "Use this information to carefully describe the transaction in your own words, "
+            "ask ONLY the security question provided, and then verify their answer "
+            "using the verify_security_answer tool."
         )
 
     @function_tool
-    async def save_lead(
+    async def verify_security_answer(
         self,
         context: RunContext,
-        name: str,
-        company: str,
-        email: str,
-        role: str,
-        use_case: str,
-        team_size: str,
-        timeline: str,
+        user_name: str,
+        provided_answer: str,
     ) -> str:
         """
-        Save the collected lead information to a JSON file.
+        Verify the user's security answer against the stored answer.
 
-        The model should call this ONCE at the end of the call, after the user
-        indicates they are done. If any field is unknown, pass 'unknown'.
+        Returns a short string describing whether verification passed or failed.
         """
 
-        lead = {
-            "timestamp": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "name": name or "unknown",
-            "company": company or "unknown",
-            "email": email or "unknown",
-            "role": role or "unknown",
-            "use_case": use_case or "unknown",
-            "team_size": team_size or "unknown",
-            "timeline": timeline or "unknown",
-        }
+        cases = _load_fraud_db()
+        case, _ = _find_case_by_username(cases, user_name)
 
-        os.makedirs(LEADS_DIR, exist_ok=True)
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        filename = f"lead-{ts}.json"
-        path = os.path.join(LEADS_DIR, filename)
+        if not case:
+            return (
+                "No fraud case found for this user name while verifying. "
+                "You should tell the user you cannot verify their identity and end the call."
+            )
 
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(lead, f, indent=2)
-            logger.info("Saved lead to %s: %s", path, lead)
-        except Exception as e:
-            logger.error("Failed to save lead: %s", e)
-            return "There was an error saving the lead information."
+        expected = str(case.get("securityAnswer", "")).strip().lower()
+        given = (provided_answer or "").strip().lower()
 
-        # Return a compact summary string for the model
+        if not expected:
+            return (
+                "No security answer is stored for this case. "
+                "You should say that you cannot perform verification and end the call."
+            )
+
+        if expected == given:
+            return (
+                "Verification PASSED. You may now proceed to describe the suspicious "
+                "transaction in detail and ask if the user made it."
+            )
+
         return (
-            f"Lead saved as {filename}. "
-            f"Name: {lead['name']}, Company: {lead['company']}, "
-            f"Email: {lead['email']}, Role: {lead['role']}, "
-            f"Use case: {lead['use_case']}, Team size: {lead['team_size']}, "
-            f"Timeline: {lead['timeline']}."
+            "Verification FAILED. You must tell the user that you cannot verify their identity "
+            "and cannot proceed with account details. "
+            "Then you should call update_fraud_status with status 'verification_failed' and end the call."
+        )
+
+    @function_tool
+    async def update_fraud_status(
+        self,
+        context: RunContext,
+        user_name: str,
+        status: str,
+        outcome_note: str,
+    ) -> str:
+        """
+        Update the fraud case status for the given user.
+
+        Valid statuses (for this demo): 'confirmed_safe', 'confirmed_fraud', 'verification_failed'.
+        Any other status will be stored as-is but should not be used normally.
+        """
+
+        cases = _load_fraud_db()
+        case, idx = _find_case_by_username(cases, user_name)
+
+        if case is None or idx is None:
+            return (
+                "No fraud case found to update for this user name. "
+                "You should verbally acknowledge that you could not update the record."
+            )
+
+        # Update fields
+        status_clean = status.strip().lower() if status else "unknown"
+        case["status"] = status_clean
+        case["outcomeNote"] = outcome_note or ""
+
+        # Add/update a lastUpdated timestamp
+        case["lastUpdated"] = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        cases[idx] = case
+        _save_fraud_db(cases)
+
+        logger.info("Fraud case for user '%s' updated to status '%s'", user_name, status_clean)
+
+        return (
+            f"Fraud case updated. Final status: {status_clean}. "
+            f"Outcome note: {case['outcomeNote']}."
         )
 
 
@@ -240,13 +284,13 @@ async def entrypoint(ctx: JobContext):
     }
 
     session = AgentSession(
-        # STT: user's speech -> text
+        # STT: speech to text
         stt=deepgram.STT(model="nova-3"),
-        # LLM: brain of the SDR
+        # LLM: brain of the fraud agent
         llm=google.LLM(
             model="gemini-2.5-flash",
         ),
-        # TTS: voice of the SDR (Murf Falcon - Matthew)
+        # TTS: Murf Falcon voice
         tts=murf.TTS(
             voice="en-US-matthew",
             style="Conversation",
@@ -256,7 +300,6 @@ async def entrypoint(ctx: JobContext):
         # Turn detection & VAD
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # Allow partial preemptive generation
         preemptive_generation=True,
     )
 
@@ -273,7 +316,6 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(log_usage)
 
-    # Start SDR session
     await session.start(
         agent=Assistant(),
         room=ctx.room,
