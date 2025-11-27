@@ -1,0 +1,15 @@
+{
+  "order_id": "order_20251127_175417",
+  "timestamp": "2025-11-27T17:54:17Z",
+  "customer_name": "Rahul Raj",
+  "address": "Begosera, India",
+  "items": [
+    {
+      "name": "Amul Milk 1L",
+      "quantity": 1,
+      "unit_price": 65.0,
+      "line_total": 65.0
+    }
+  ],
+  "total": 65.0
+}

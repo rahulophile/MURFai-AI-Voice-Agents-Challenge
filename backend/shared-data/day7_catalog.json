@@ -1,0 +1,23 @@
+[
+  {
+    "id": "bread_1",
+    "name": "Whole Wheat Bread",
+    "category": "grocery",
+    "price": 40,
+    "tags": ["bread", "wheat"]
+  },
+  {
+    "id": "milk_1",
+    "name": "Amul Milk 1L",
+    "category": "grocery",
+    "price": 65,
+    "tags": ["milk"]
+  },
+  {
+    "id": "eggs_1",
+    "name": "Farm Eggs 6 pcs",
+    "category": "grocery",
+    "price": 55,
+    "tags": ["eggs"]
+  }
+]
